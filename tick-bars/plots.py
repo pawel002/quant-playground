@@ -72,6 +72,31 @@ def plot_continuous(result_df: pl.DataFrame, output_path: str | Path) -> Path:
     return save(fig, output_path)
 
 
+def plot_daily_stability(daily_stats: dict[str, pl.DataFrame], output_path: str | Path) -> Path:
+    """
+    Rolling mean (top) and rolling std (bottom) of the daily tick counts, one line per tick type.
+    `daily_stats` maps a name (e.g. "volume") to the output of `asses_daily_stability`
+    (columns `ts_datetime`, `rolling_mean`, `rolling_stds`).
+    """
+    plt.switch_backend("Agg")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    colors = ["#2a78d6", "#eb6834", "#1baf7a"]
+
+    for (name, stats), color in zip(daily_stats.items(), colors):
+        ax1.plot(stats["ts_datetime"], stats["rolling_mean"], color=color, linewidth=1.5, label=name)
+        ax2.plot(stats["ts_datetime"], stats["rolling_stds"], color=color, linewidth=1.5, label=name)
+
+    ax1.set_ylabel("Rolling mean")
+    ax1.set_title("Daily tick count stability")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.3)
+
+    ax2.set_ylabel("Rolling std")
+    ax2.grid(True, alpha=0.3)
+
+    return save(fig, output_path)
+
+
 def save(fig, output_path: str | Path) -> Path:
     """Save a figure relative to this folder and close it."""
     out_path = Path(output_path)

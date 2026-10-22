@@ -2,7 +2,7 @@ from pathlib import Path
 
 import polars as pl
 
-from plots import plot_continuous, plot_ticks
+from plots import plot_continuous, plot_ticks, plot_daily_stability
 
 def apply_etf_trick(df: pl.DataFrame, starting_base: float = 1000.0) -> pl.DataFrame:
     """
@@ -51,7 +51,7 @@ def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str) -> tuple[pl.Da
         .sort("ts_datetime")
     )
 
-    weekly_ticks = (
+    daily_ticks = (
         ticks
         .group_by_dynamic("ts_datetime", every=agg_bin_size)
         .agg(
@@ -59,7 +59,7 @@ def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str) -> tuple[pl.Da
         )
     )
 
-    return ticks.collect(), weekly_ticks.collect()
+    return ticks.collect(), daily_ticks.collect()
 
 
 def volume(df: pl.DataFrame, volume_bin_size: int, agg_bin_size: str) -> pl.DataFrame:
@@ -85,7 +85,7 @@ def volume(df: pl.DataFrame, volume_bin_size: int, agg_bin_size: str) -> pl.Data
         .sort("ts_datetime")
     )
 
-    weekly_ticks = (
+    daily_ticks = (
         ticks
         .group_by_dynamic("ts_datetime", every=agg_bin_size)
         .agg(
@@ -93,7 +93,7 @@ def volume(df: pl.DataFrame, volume_bin_size: int, agg_bin_size: str) -> pl.Data
         )
     )
 
-    return ticks.collect(), weekly_ticks.collect()
+    return ticks.collect(), daily_ticks.collect()
 
 
 def dollar(df: pl.DataFrame, dollar_bin_size: int, agg_bin_size: str) -> pl.DataFrame:
@@ -119,7 +119,7 @@ def dollar(df: pl.DataFrame, dollar_bin_size: int, agg_bin_size: str) -> pl.Data
         .sort("ts_datetime")
     )
 
-    weekly_ticks = (
+    daily_ticks = (
         ticks
         .group_by_dynamic("ts_datetime", every=agg_bin_size)
         .agg(
@@ -127,8 +127,22 @@ def dollar(df: pl.DataFrame, dollar_bin_size: int, agg_bin_size: str) -> pl.Data
         )
     )
 
-    return ticks.collect(), weekly_ticks.collect()
+    return ticks.collect(), daily_ticks.collect()
 
+
+def asses_daily_stability(df: pl.DataFrame, window_size: int) -> pl.DataFrame:
+
+    return (
+        df.lazy()
+        .with_columns(
+            deltas=pl.col("tick_count").diff().fill_null(0.0)
+        )
+        .with_columns(
+            rolling_mean=pl.col("deltas").rolling_mean(window_size=window_size),
+            rolling_stds=pl.col("deltas").rolling_std(window_size=window_size),
+        )
+        .collect()
+    )
 
 def main():
 
@@ -149,8 +163,8 @@ def main():
 
     agg_interval = "1d"
     bin_size = 10000
-    timestamp_ticks, weekly_timestamp_ticks_count = timestamp(df, bin_size, agg_interval)
-    plot_ticks(timestamp_ticks, weekly_timestamp_ticks_count, "output/timestamp-ticks.png")
+    timestamp_ticks, daily_timestamp_ticks_count = timestamp(df, bin_size, agg_interval)
+    plot_ticks(timestamp_ticks, daily_timestamp_ticks_count, "output/timestamp-ticks.png")
     plot_continuous(timestamp_ticks, "output/timestamp-continuous.png")
 
     avg_trade_size = (
@@ -159,8 +173,8 @@ def main():
         .item()
     )
     volume_bin_size = bin_size * avg_trade_size
-    volume_ticks, weekly_volume_ticks_count = volume(df, volume_bin_size, agg_interval)
-    plot_ticks(volume_ticks, weekly_volume_ticks_count, "output/volume-ticks.png")
+    volume_ticks, daily_volume_ticks_count = volume(df, volume_bin_size, agg_interval)
+    plot_ticks(volume_ticks, daily_volume_ticks_count, "output/volume-ticks.png")
 
     dollar_bin_size = (
         df.select(
@@ -169,8 +183,19 @@ def main():
         .collect()
         .item()
     ) * bin_size
-    dollar_ticks, weekly_dollar_ticks_count = dollar(df, dollar_bin_size, agg_interval)
-    plot_ticks(dollar_ticks, weekly_dollar_ticks_count, "output/dollar-ticks.png")
+    dollar_ticks, daily_dollar_ticks_count = dollar(df, dollar_bin_size, agg_interval)
+    plot_ticks(dollar_ticks, daily_dollar_ticks_count, "output/dollar-ticks.png")
+
+
+    for window_size in [5, 10, 15]:
+        plot_daily_stability(
+        {
+            "timestamp": asses_daily_stability(daily_timestamp_ticks_count, window_size),
+            "volume": asses_daily_stability(daily_volume_ticks_count, window_size),
+            "dollar": asses_daily_stability(daily_dollar_ticks_count, window_size),
+        },
+        f"output/daily-stability-{window_size}.png",
+)
 
 
 

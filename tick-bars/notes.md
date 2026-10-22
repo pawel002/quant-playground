@@ -226,6 +226,37 @@ Now we have the additional field `continous_price` in the dataframe. We can pull
 
 By creating another simple plotting function and visualizing the `price` vs. `continous_price` closing prices, we see:
 
-![image](./output/dollar-continuous.png)
+![image](./output/timestamp-continuous.png)
 
-### Assessing the stability of
+### Assessing the stability of tick plots
+
+Because I have fetched only 6 months of data, I have decided to plot the daily volumes and then asses the stability of the tick plots. The first idea is to take the `diff()` between the tick count columns and calculate its' mean and std. This would is the wrong approach, because calculating one communal mean and std masks the small movements of the market. Analysing the overall mean of the deltas will only give us the overall trend in the market and won't provide any information about local variablity. The same goes for the standard deviation. Thats why we use and plot rolling metrics. In those examples I plotted the values with windows size $\in \{5, 10, 15 \}. Of course the longer the window, the more smoothing will be present on the graph. The code which calculates rolling metrics looks like this:
+
+```python
+
+for window_size in [5, 10, 15]:
+    metrics = (
+        daily_tick_count.lazy()
+        # calculate the deltas, take care of first null
+        .with_columns(
+            deltas=pl.col("tick_count").diff().fill_null(0.0)
+        )
+        # create the rolling metrics
+        .with_columns(
+            rolling_mean=pl.col("deltas").rolling_mean(window_size=window_size),
+            rolling_stds=pl.col("deltas").rolling_std(window_size=window_size),
+        )
+        .collect()
+    )
+    plot(metrics, ...)
+```
+
+Which yields:
+
+![image](./output/daily-stability-5.png)
+
+![image](./output/daily-stability-10.png)
+
+![image](./output/daily-stability-15.png)
+
+I think that the dollar plots look pretty good and maybe better than the rest. I think that it might be because given a set of investors, they operate with a constant amount of capital through the instrument. And because the capital is defined by the price in USD, it should stay pretty constant througout the entire period.
