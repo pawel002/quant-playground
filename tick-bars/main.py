@@ -161,7 +161,6 @@ def main():
     volume_bin_size = bin_size * avg_trade_size
     volume_ticks, weekly_volume_ticks_count = volume(df, volume_bin_size, agg_interval)
     plot_ticks(volume_ticks, weekly_volume_ticks_count, "output/volume-ticks.png")
-    plot_continuous(volume_ticks, "output/volume-continuous.png")
 
     dollar_bin_size = (
         df.select(
@@ -172,7 +171,6 @@ def main():
     ) * bin_size
     dollar_ticks, weekly_dollar_ticks_count = dollar(df, dollar_bin_size, agg_interval)
     plot_ticks(dollar_ticks, weekly_dollar_ticks_count, "output/dollar-ticks.png")
-    plot_continuous(dollar_ticks, "output/dollar-continuous.png")
 
 
 
