@@ -144,6 +144,25 @@ def asses_daily_stability(df: pl.DataFrame, window_size: int) -> pl.DataFrame:
         .collect()
     )
 
+
+def calculate_serial_correlation(df: pl.DataFrame, lag: int = 1) -> float:
+
+    return (
+        df.lazy()
+        .with_columns(
+            log_return=(pl.col("close") / pl.col("close").shift(1)).log()
+        )
+        .with_columns(
+            lagged_return=pl.col("log_return").shift(lag)
+        )
+        .select(
+            serial_corr=pl.corr("log_return", "lagged_return", method="pearson")
+        )
+        .collect()
+        .select("serial_corr")
+        .item()
+    )
+
 def main():
 
     columns = ["ts_recv", "instrument_id", "price", "size"]
@@ -187,16 +206,21 @@ def main():
     plot_ticks(dollar_ticks, daily_dollar_ticks_count, "output/dollar-ticks.png")
 
 
-    for window_size in [5, 10, 15]:
+    for window_size in [5, 10, 15]: 
         plot_daily_stability(
-        {
-            "timestamp": asses_daily_stability(daily_timestamp_ticks_count, window_size),
-            "volume": asses_daily_stability(daily_volume_ticks_count, window_size),
-            "dollar": asses_daily_stability(daily_dollar_ticks_count, window_size),
-        },
-        f"output/daily-stability-{window_size}.png",
-)
+            {
+                "timestamp": asses_daily_stability(daily_timestamp_ticks_count, window_size),
+                "volume": asses_daily_stability(daily_volume_ticks_count, window_size),
+                "dollar": asses_daily_stability(daily_dollar_ticks_count, window_size),
+            },
+            f"output/daily-stability-{window_size}.png",
+        )
 
+    for k in [1, 5, 10, 15, 20]:
+        print(f"Lag value k = {k}")
+        print(f"\tTimestamp serial correlation: {calculate_serial_correlation(timestamp_ticks, k):.4f}")
+        print(f"\tVolume serial correlation:    {calculate_serial_correlation(volume_ticks, k):.4f}")
+        print(f"\tDollar serial correlation:    {calculate_serial_correlation(dollar_ticks, k):.4f}")
 
 
 if __name__ == "__main__":

@@ -260,3 +260,95 @@ Which yields:
 ![image](./output/daily-stability-15.png)
 
 I think that the dollar plots look pretty good and maybe better than the rest. I think that it might be because given a set of investors, they operate with a constant amount of capital through the instrument. And because the capital is defined by the price in USD, it should stay pretty constant througout the entire period.
+
+### Assesing the corelations
+
+First we need to define what the returns are. Let's distinct them into three types:
+
+- Simple dollar amount return. Given the price of an asset at times $t-1$ and $t$, we calculate a delta:
+
+  $$
+      R_t = P_t - P_{t-1}.
+  $$
+
+- Percentage returns. This is the most often used return description method. It is calculated using:
+
+  $$
+      R_t = \frac{P_t - P_{t-1}}{P_{t-1}}.
+  $$
+
+  It is easily interpretable for humans but its a skewed data type. We can image that if the stock price drops 50% then it has to go back up a 100% to make up for the drop. This means that the returns doesn't add up to 0 over the periods when absolute difference between start and end points is 0.
+
+- Log returns. It makes the returns perfectly interpretable for ML models. It is described using:
+
+  $$
+      R_t = \ln \left(\frac{P_t}{P_{t - 1}} \right) = \ln P_t - \ln P_{t - 1}.
+  $$
+
+  We can simply add log returns together across time to calculate total returns over a week or a month. ML algorithms require stationary data (constant mean and variance over time). Converting an exponentially growing price series into log returns flattens it into a stable, stationary series that algorithms can actually interpret.
+
+Okay back to the returns correlation topic. We can interpret **serial correlation** (or autocorrelation) as a statistical measurement of how heavily a variable's current value is related to its past values over a specific time lag. Basically it defines a momentum over time. Positive correlations singnals that the uprising stock price will likely be followed by another rise.
+
+The serial correlation of returns $R$ at a given lag $k$ is calculated using the Pearson correlation formula against its own lagged series:
+
+$$
+    r_k = \frac{\sum_{t=k+1}^{T} (R_t - \bar{R})(R_{t-k} - \bar{R})}{\sum_{t=1}^{T} (R_t - \bar{R})^2},
+$$
+
+where:
+
+- $R_t$ is the return in time $t$,
+- $R_{t - k}$ is the return shifted $k$ steps backward,
+- $\bar{R}$ is the mean return.
+
+Implementing this formula in Polars gives:
+
+```python
+for lag in [1, 5, 10, 15, 20]:
+    corr = (
+        df.lazy()
+        # create the log return column by shifting, dividing and taking a log
+        .with_columns(
+            log_return=(pl.col("close") / pl.col("close").shift(1)).log()
+        )
+        # create lagged return column
+        .with_columns(
+            lagged_return=pl.col("log_return").shift(lag)
+        )
+        # use built-in pl.corr method to calculate the correlation between columns
+        .select(
+            serial_corr=pl.corr("log_return", "lagged_return", method="pearson")
+        )
+        .collect()
+        # cast to a single number
+        .select("serial_corr")
+        .item()
+    )
+```
+
+Running the code and printing the results gives:
+
+```
+Lag value k = 1
+        Timestamp serial correlation: -0.0018
+        Volume serial correlation:    -0.0067
+        Dollar serial correlation:    -0.0069
+Lag value k = 5
+        Timestamp serial correlation: 0.0126
+        Volume serial correlation:    -0.0213
+        Dollar serial correlation:    -0.0020
+Lag value k = 10
+        Timestamp serial correlation: -0.0120
+        Volume serial correlation:    0.0021
+        Dollar serial correlation:    0.0063
+Lag value k = 15
+        Timestamp serial correlation: -0.0049
+        Volume serial correlation:    -0.0064
+        Dollar serial correlation:    0.0060
+Lag value k = 20
+        Timestamp serial correlation: -0.0045
+        Volume serial correlation:    0.0144
+        Dollar serial correlation:    0.0108
+```
+
+I feel like the dollar correlations are the smallest or at least have the smallest variability when looking at the different lag coeff values.
