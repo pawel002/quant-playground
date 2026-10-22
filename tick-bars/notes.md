@@ -1,5 +1,7 @@
 ## Ticks
 
+### Used data - E-mini S&P500
+
 To better undestand the tick system I have decided to fetch the mini S&P 500 data from Databento. The fetched data has many symbols and this is what I understand all of those fields mean:
 
 - `ts_recv` - timestamp in UTC when Databento received the trade message. A trade message desribes the actual execution of a trade the moment the an exchanges matching engine makes a match. It is a permanent record of the transation being committed. While limit orders represent the intention to sell or buy at a given price, a trade message actually represents an executed transaction.
@@ -49,3 +51,112 @@ To better undestand the tick system I have decided to fetch the mini S&P 500 dat
 - `symbol` - the indetifier of the traded symbol, here it is contants and equal to ES.v.0.
 
 Okay I think that right now we know what the data is about. We can go over to analysing the ticks and processing the data.
+
+### Creating tick plots
+
+Let's jump into the code which can be used to generate various tick data. Given the data described above first we need to load it and do initial filtration. We can use Polar's lazy scanning and processing to first construct the execution graph of the operation and then eagerly execute all optimized operations. Loading and filtration can be performed using:
+
+```python
+columns = ["ts_recv", "price", "size"]
+data_path = Path(__file__).parent.parent / "data" / "ES-trades-2026-04-21_2026-10-21.parquet"
+df = (
+    pl.scan_parquet(data_path)
+    .select(columns)
+    .with_row_index()
+)
+```
+
+the rows are indexes (it will come in handy later). Lets create a dataframe holding the actual ticks data:
+
+```python
+timestamp_bin_size = 10000
+ticks = (
+    df.lazy()
+    # quantizing the ticks into bins
+    .with_columns(
+        bin=(pl.col("index") // timestamp_bin_size)
+    )
+    # grouping by index
+    .group_by("bin")
+    # aggregating the most useful values OHLCV
+    .agg(
+        ts_datetime=pl.from_epoch(pl.col("ts_recv"), time_unit="ns").first(),
+        open=pl.col("price").first(),
+        high=pl.col("price").max(),
+        low=pl.col("price").min(),
+        close=pl.col("price").last(),
+        volume=pl.col("size").sum(),
+    )
+    # again sort by timestamp
+    .sort("ts_datetime")
+)
+```
+
+This code produces a dataframe which for each row stores the OHLCV data which is interesting to us. To see how different tick types evolve during the weeks, we can also aggregate how many ticks were produced each week.
+
+```python
+weekly_ticks = (
+    ticks
+    .group_by_dynamic("ts_datetime", every=agg_bin_size)
+    .agg(
+        tick_count=pl.len()
+    )
+)
+```
+
+After feeding it through a simple plotting function, we get this plot.
+
+![image](./output/timestamp-ticks.png)
+
+By changing the preprocessing a little bit, we can get volume bars and dollar bars. To get volumen bars, we need to calculate the average trade size (to normalise the bin size, so the timestamp ticks and volume ticks operate on the same bin scale), calculate the cumsum of the trade sizes and group using bins derived from those values. The futher processing is exactly the same as for timestamp ticks.
+
+```python
+volume_bin_size = (
+    df.select(pl.col("size").mean())
+    .collect()
+    .item()
+) * timestamp_bin_size
+
+ticks = (
+    df.lazy()
+    .with_columns(
+        cum_volume=pl.col("size").cum_sum()
+    )
+    .with_columns(
+        bin=(pl.col("cum_volume") // volume_bin_size)
+    )
+    ...
+)
+```
+
+This produces:
+
+![image](./output/volume-ticks.png)
+
+By doing slightly different processing we get dollar ticks.
+
+```python
+stock_value = 50.0
+dollar_bin_size = (
+    df.select(
+        (pl.col("price") * pl.col("size") * stock_value).mean()
+    )
+    .collect()
+    .item()
+) * timestamp_bin_size
+
+ticks = (
+    df.lazy()
+    .with_columns(
+        cum_dollar=(pl.col("size") * pl.col("price") * stock_value).cum_sum()
+    )
+    .with_columns(
+        bin=(pl.col("cum_dollar") // dollar_bin_size)
+    )
+    ...
+)
+```
+
+This produces:
+
+![image](./output/dollar-ticks.png)
