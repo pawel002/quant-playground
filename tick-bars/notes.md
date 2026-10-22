@@ -54,7 +54,7 @@ Okay I think that right now we know what the data is about. We can go over to an
 
 ### Creating tick plots
 
-Let's jump into the code which can be used to generate various tick data. Given the data described above first we need to load it and do initial filtration. We can use Polar's lazy scanning and processing to first construct the execution graph of the operation and then eagerly execute all optimized operations. Loading and filtration can be performed using:
+Let's jump into the code which can be used to generate various tick data. Given the data described above first we need to load it and do initial filtration. We can use Polars' lazy scanning and processing to first construct the execution graph of the operation and then eagerly execute all optimized operations. Loading and filtration can be performed using:
 
 ```python
 columns = ["ts_recv", "price", "size"]
@@ -160,3 +160,27 @@ ticks = (
 This produces:
 
 ![image](./output/dollar-ticks.png)
+
+### Solving the rollover problem
+
+Because the the futures expire and the investors don't want to settle the future into cash, the rollover is performed. This is done by the **Calendar Trade**, which in one singular command executes two actions, sells the old instrument and buys the new one. This approach guarantees a consitant price between the rollover episode. Because the instrument changes, there can be (and often is) a discrepancy between the price of those two instruments. Standard backward-adjustment (the "Panama Canal" method) subtracts the roll gap from historical prices, which eventually drives historical prices below zero, destroying the ability to calculate percentage or log returns. The ETF Trick solves this by simulating an actual portfolio (like an ETF) that holds the active contract. Instead of adjusting past prices, it continually accumulates the true realized Profit & Loss (P&L) of the currently held asset, starting from a base value of $1.00 (or any starting capital).
+
+We can simulate this process like this. Let $K_0 = \$100.00$ be the price of the simulated asset. The price of this asset is controlled only by the difference in the price between the **active** contracts. If no roll occured between the timestamps $t$ and $t+1$, we set:
+
+$$
+    \Delta P_t = P_t - P_{t-1}.
+$$
+
+If the roll occured:
+
+$$
+    \Delta P_t = 0.
+$$
+
+Your new, mathematically pure continuous price is simply the cumulative sum of those true price changes added to your starting base:
+
+$$
+    K_t = K_0 + \sum_{i=1}^{t} \Delta P_i
+$$
+
+Let's implement the solution to the rollover problem in Polars.

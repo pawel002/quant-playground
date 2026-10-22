@@ -4,7 +4,35 @@ import polars as pl
 
 from plots import plot_ticks
 
-def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str) -> tuple[pl.DataFrame, pl.DataFrame]:
+def apply_etf_trick(df: pl.DataFrame, starting_base: float = 1000.0) -> pl.DataFrame:
+    """
+    Applies the ETF trick to raw futures tick data to create a continuous, strictly positive price series.
+    Assumes df is sorted chronologically and contains 'instrument_id' and 'price'.
+    """
+
+    return (
+        df.lazy()
+        .with_columns(
+            price_diff=pl.col("price").diff()
+        )
+        .with_columns(
+            true_pnl=(
+                pl.when(pl.col("instrument_id") != pl.col("instrument_id").shift(1))
+                .then(0.0)
+                .otherwise(pl.col("price_diff"))
+            )
+        )
+        .with_columns(
+            continous_price=(
+                pl.col("true_pnl").fill_null(0.0).cum_sum() + starting_base
+            )
+        )
+        .drop(["price_diff", "true_pnl"])
+    )
+
+
+
+def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str, field: str) -> tuple[pl.DataFrame, pl.DataFrame]:
 
     ticks = (
         df.lazy()
@@ -131,7 +159,6 @@ def main():
     ) * bin_size
     dollar_ticks, weekly_dollar_ticks_count = dollar(df, dollar_bin_size, agg_interval)
     plot_ticks(dollar_ticks, weekly_dollar_ticks_count, "output/dollar-ticks.png")
-
 
 
 
