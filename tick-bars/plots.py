@@ -50,15 +50,37 @@ def plot_ticks(result_df: pl.DataFrame, weekly_ticks: pl.DataFrame, output_path:
     ax2.set_xlabel("Week")
     ax2.grid(True, alpha=0.3)
 
-    plt.tight_layout()
+    return save(fig, output_path)
 
-    # Save output
+
+def plot_continuous(result_df: pl.DataFrame, output_path: str | Path) -> Path:
+    """
+    Overlays the raw bar close price and the continuous (roll-adjusted) close price.
+    The lines match until the first roll; after each roll they differ by the roll gap.
+    """
+    plt.switch_backend("Agg")
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    ax.plot(result_df["ts_datetime"], result_df["close"], color="#8a8984", linewidth=1, label="raw price")
+    ax.plot(result_df["ts_datetime"], result_df["continuous_close"], color="#2a78d6", linewidth=1, label="continuous price")
+
+    ax.set_ylabel("Price")
+    ax.set_title("Raw vs continuous price")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+
+    return save(fig, output_path)
+
+
+def save(fig, output_path: str | Path) -> Path:
+    """Save a figure relative to this folder and close it."""
     out_path = Path(output_path)
     if not out_path.is_absolute():
         out_path = Path(__file__).parent / out_path
-    
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
     return out_path

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import polars as pl
 
-from plots import plot_ticks
+from plots import plot_continuous, plot_ticks
 
 def apply_etf_trick(df: pl.DataFrame, starting_base: float = 1000.0) -> pl.DataFrame:
     """
@@ -31,8 +31,7 @@ def apply_etf_trick(df: pl.DataFrame, starting_base: float = 1000.0) -> pl.DataF
     )
 
 
-
-def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str, field: str) -> tuple[pl.DataFrame, pl.DataFrame]:
+def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str) -> tuple[pl.DataFrame, pl.DataFrame]:
 
     ticks = (
         df.lazy()
@@ -47,6 +46,7 @@ def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str, field: str) ->
             low=pl.col("price").min(),
             close=pl.col("price").last(),
             volume=pl.col("size").sum(),
+            continuous_close=pl.col("continous_price").last(),
         )
         .sort("ts_datetime")
     )
@@ -60,6 +60,7 @@ def timestamp(df: pl.DataFrame, bin_size: int, agg_bin_size: str, field: str) ->
     )
 
     return ticks.collect(), weekly_ticks.collect()
+
 
 def volume(df: pl.DataFrame, volume_bin_size: int, agg_bin_size: str) -> pl.DataFrame:
 
@@ -79,6 +80,7 @@ def volume(df: pl.DataFrame, volume_bin_size: int, agg_bin_size: str) -> pl.Data
             low=pl.col("price").min(),
             close=pl.col("price").last(),
             volume=pl.col("size").sum(),
+            continuous_close=pl.col("continous_price").last(),
         )
         .sort("ts_datetime")
     )
@@ -112,6 +114,7 @@ def dollar(df: pl.DataFrame, dollar_bin_size: int, agg_bin_size: str) -> pl.Data
             low=pl.col("price").min(),
             close=pl.col("price").last(),
             volume=pl.col("size").sum(),
+            continuous_close=pl.col("continous_price").last(),
         )
         .sort("ts_datetime")
     )
@@ -126,20 +129,29 @@ def dollar(df: pl.DataFrame, dollar_bin_size: int, agg_bin_size: str) -> pl.Data
 
     return ticks.collect(), weekly_ticks.collect()
 
+
 def main():
 
-    columns = ["ts_recv", "price", "size"]
+    columns = ["ts_recv", "instrument_id", "price", "size"]
     data_path = Path(__file__).parent.parent / "data" / "ES-trades-2026-04-21_2026-10-21.parquet"
     df = (
         pl.scan_parquet(data_path)
         .select(columns)
         .with_row_index()
     )
+    # start the continuous series at the first traded price, so both lines match until the first roll
+    first_price = (
+        df.select(pl.col("price").first())
+        .collect()
+        .item()
+    )
+    df = apply_etf_trick(df, starting_base=first_price)
 
     agg_interval = "1d"
     bin_size = 10000
     timestamp_ticks, weekly_timestamp_ticks_count = timestamp(df, bin_size, agg_interval)
     plot_ticks(timestamp_ticks, weekly_timestamp_ticks_count, "output/timestamp-ticks.png")
+    plot_continuous(timestamp_ticks, "output/timestamp-continuous.png")
 
     avg_trade_size = (
         df.select(pl.col("size").mean())
@@ -149,6 +161,7 @@ def main():
     volume_bin_size = bin_size * avg_trade_size
     volume_ticks, weekly_volume_ticks_count = volume(df, volume_bin_size, agg_interval)
     plot_ticks(volume_ticks, weekly_volume_ticks_count, "output/volume-ticks.png")
+    plot_continuous(volume_ticks, "output/volume-continuous.png")
 
     dollar_bin_size = (
         df.select(
@@ -159,6 +172,7 @@ def main():
     ) * bin_size
     dollar_ticks, weekly_dollar_ticks_count = dollar(df, dollar_bin_size, agg_interval)
     plot_ticks(dollar_ticks, weekly_dollar_ticks_count, "output/dollar-ticks.png")
+    plot_continuous(dollar_ticks, "output/dollar-continuous.png")
 
 
 
