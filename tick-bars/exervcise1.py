@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import polars as pl
+import numpy as np
 
 from plots import plot_continuous, plot_ticks, plot_daily_stability
 
@@ -163,6 +164,32 @@ def calculate_serial_correlation(df: pl.DataFrame, lag: int = 1) -> float:
         .item()
     )
 
+
+def jarque_bera_test(df: pl.DataFrame) -> float:
+
+    returns = (
+        df.lazy()
+        .with_columns(
+            log_return=(pl.col("close") / pl.col("close").shift(1)).log()
+        )
+        .collect()
+    )
+
+    skew = (
+        returns
+        .select(pl.col("log_return").skew())
+        .item()
+    )
+
+    kurtosis = (
+        returns
+        .select(pl.col("log_return").kurtosis())
+        .item()
+    )
+
+    return len(returns) * (skew ** 2 + kurtosis ** 2 / 4) / 6
+
+
 def main():
 
     columns = ["ts_recv", "instrument_id", "price", "size"]
@@ -221,6 +248,13 @@ def main():
         print(f"\tTimestamp serial correlation: {calculate_serial_correlation(timestamp_ticks, k):.4f}")
         print(f"\tVolume serial correlation:    {calculate_serial_correlation(volume_ticks, k):.4f}")
         print(f"\tDollar serial correlation:    {calculate_serial_correlation(dollar_ticks, k):.4f}")
+
+    print("Jarque-Bera test")
+    for name, ticks in zip(
+        ["timestamp", "volume", "dollars"],
+        [timestamp_ticks, volume_ticks, dollar_ticks]
+    ):
+        print(f"\tValue for {name} ticks is {jarque_bera_test(ticks):.2f}")
 
 
 if __name__ == "__main__":

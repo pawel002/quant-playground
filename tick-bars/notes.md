@@ -352,3 +352,43 @@ Lag value k = 20
 ```
 
 I feel like the dollar correlations are the smallest or at least have the smallest variability when looking at the different lag coeff values.
+
+### Checking the "normality" of the returns distribution
+
+We can do a Jarque-Bera test on the returns to check if it performs like a normal distribution. To do that we need to calculate two metric of our returns, skewness and kurtosis. The normal distribution has skewness equal to $0$ and kurtosis equal to $3$, the Jarque-Baro test basically calculates the distance from those values and weights them creating a perfect score equal to $0$ which should appear as we analyse close to inf number of samples. If the distribution deviates from normal it will move further from $0$. Quick refresher of how to calculate those values:
+
+Skewness:
+
+$$
+    \text{S} = \mathbb{E} \left[ \left( \frac{X - \mu}{\sigma} \right)^3 \right].
+$$
+
+If $\sigma$ and $\mu$ is finite, we can expand the formula to get:
+
+$$
+    \text{S}= \frac{1}{\sigma^3} \left(  \mathbb{E}X^3 - 3\mu  \mathbb{E} X^2 + 2\mu^3 \right).
+$$
+
+Because we take a sample from a distribution of values, we need to use the biased estimator. The same for Kurtosis:
+
+$$
+    \text{K} = \mathbb{E} \left[ \left( \frac{X - \mu}{\sigma} \right)^4 \right]
+$$
+
+The Jarque-Bera normality test is calculated by:
+
+$$
+    \text{JB} = \frac{n}{6} \left(\text{S}^2 + \frac{1}{4}(K - 3)^2 \right).
+$$
+
+The further the value of this metric is from 0, the further the distribution is from normal. For our returns we get:
+
+```
+Jarque-Bera test
+        Value for timestamp ticks is 6726.59
+        Value for volume ticks is 7862.27
+        Value for dollars ticks is 7620.15
+```
+
+As we can see the distribution of the returns doesn't come from the normal distribution, for this hypothesis to hold the JB values should be way below 6 and close to 0.
+
