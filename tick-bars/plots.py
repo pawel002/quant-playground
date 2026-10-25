@@ -97,6 +97,24 @@ def plot_daily_stability(daily_stats: dict[str, pl.DataFrame], output_path: str 
     return save(fig, output_path)
 
 
+def plot_imbalance_threshold(result_df: pl.DataFrame, output_path: str | Path) -> Path:
+    """
+    Threshold |theta| had to reach to close each imbalance bar, plotted at the bar's start time.
+    Log scale, because the adaptive threshold can change by orders of magnitude.
+    """
+    plt.switch_backend("Agg")
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    ax.plot(result_df["ts_datetime"], result_df["threshold"], color="#2a78d6", linewidth=1)
+    ax.set_yscale("log")
+
+    ax.set_ylabel("Threshold [$]")
+    ax.set_title("Dollar imbalance bar threshold")
+    ax.grid(True, alpha=0.3)
+
+    return save(fig, output_path)
+
+
 def save(fig, output_path: str | Path) -> Path:
     """Save a figure relative to this folder and close it."""
     out_path = Path(output_path)

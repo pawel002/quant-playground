@@ -388,7 +388,7 @@ $$
     \hat{\text{K}} = \frac{m_4}{m_2^{2}} = \frac{\frac{1}{n}\sum_{i=1}^{n} (x_i - \bar{x})^4}{\left( \frac{1}{n}\sum_{i=1}^{n} (x_i - \bar{x})^2 \right)^{2}}.
 $$
 
-They are biased because every moment divides by $n$ (not $n-1$) and uses the estimated mean $\bar{x}$ instead of the true $\mu$. In Polars these are `pl.col(...).skew()` and `pl.col(...).kurtosis(fisher=False)` (both default to `bias=True`). Note that plain `kurtosis()` returns the *excess* kurtosis $\hat{\text{K}} - 3$.
+They are biased because every moment divides by $n$ (not $n-1$) and uses the estimated mean $\bar{x}$ instead of the true $\mu$. In Polars these are `pl.col(...).skew()` and `pl.col(...).kurtosis(fisher=False)` (both default to `bias=True`). Note that plain `kurtosis()` returns the _excess_ kurtosis $\hat{\text{K}} - 3$.
 
 The Jarque-Bera normality test is calculated from these sample estimates:
 
@@ -429,9 +429,21 @@ $$
   \theta_T = \sum_{t=1}^T d_t.
 $$
 
-We accumulate the value of $\theta$ until some threshold $|\theta_T| > \theta_M$ is reached, which mints the bar (ends the previous one, opens the next one, and calculates the metrics on the accumulated trades, i.e. OHLCV). After the threshold is met, the accumulator is reset to 0. How do we implement this in code?
+We accumulate the value of $\theta$ until some threshold $|\theta_T| > \theta_M$ is reached, which mints the bar (ends the previous one, opens the next one, and calculates the metrics on the accumulated trades, i.e. OHLCV). After the threshold is met, the accumulator is reset to 0. The naive way would be to set a static $\theta_M$, but this would make the model not reflect the different intensity intervals during the trading hours. For example a threshold calibrated to high intensity hours will generate next to none bars when the market is calm. To mitigate thsi issue, we can use non-stationary evaluation of the threshold. Instead of a static number, the threshold for triggering a new bar is the mathematical expectation of that imbalance:
 
-First, we need to evaluate the $d_t$ values for each trade:
+$$
+  E[\theta_T] = E[T] \times | E[d_t] |
+$$
+
+To calculate this dynamically in practice, we can break it down into two rolling EWMA components:
+
+1. Expected Ticks per Bar: $E[T]$ This is the EWMA of the number of ticks it took to form previous bars. If recent bars took 5,000 ticks to form on average, $E[T] = 5000$.
+
+2. Expected Signed Dollar Volume: $E[d_t]$ This is the EWMA of the signed dollar volume across recent ticks. It measures the recent baseline of market directionality.
+
+This algorithm will basically autoscale with digested data. When the market is volitile and previous threshold is hit withing 500 trades instead of 5000, the threshold will drop for future reads.
+
+How do we implement this in code? First, we need to evaluate the $d_t$ values for each trade:
 
 ```python
 prep_df = (
@@ -463,31 +475,56 @@ prep_df = (
 )
 ```
 
-Then we need to run the accumulation logic, which isn't a standard function in Polars. To achieve better speed, we will extract the column, convert it to a NumPy array, and implement the function with Numba's `@njit` decorator.
+Then we need to run the accumulation logic, which isn't a standard function in Polars. To achieve better speed, we will extract the column, convert it to a NumPy array, and implement the function with Numba's `@njit` decorator. I have also decided to return the estimated volume to better understand how it scales with the movement of the market.
 
 ```python
 @njit
-def compute_imbalance_bars_ids(
+def compute_dynamic_imbalance_bars(
     signed_dollars: npt.NDArray[np.float64],
-    threshold: float
-) -> npt.NDArray[np.int64]:
+    init_T: float,
+    init_d: float,
+    alpha: float = 0.01  # EWMA smoothing factor (e.g., 0.01 for ~200 bar lookback)
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.float64]]:
 
     n = len(signed_dollars)
     bar_ids = np.empty(n, dtype=np.int64)
+    # threshold used by each bar (at most n bars), trimmed before returning
+    thresholds = np.empty(n, dtype=np.float64)
 
     current_bar_id = 0
-    cummulative_sum = 0.0
+    current_imbalance = 0.0
+    current_T = 0
+
+    ewma_T = init_T
+    ewma_d = init_d
 
     for i in range(n):
 
-        cummulative_sum += signed_dollars[i]
+        current_imbalance += signed_dollars[i]
         bar_ids[i] = current_bar_id
+        current_T += 1
 
-        if abs(cummulative_sum) >= threshold:
+        # Calculate dynamic threshold: E[T] * |E[d_t]|
+        threshold = ewma_T * abs(ewma_d)
+
+        if threshold < 1e-5:
+            threshold = init_T * abs(init_d)
+
+        thresholds[current_bar_id] = threshold
+
+        if abs(current_imbalance) >= threshold:
+
+            # update EWMA
+            ewma_T = (alpha * current_T) + ((1.0 - alpha) * ewma_T)
+
+            bar_mean_d = current_imbalance / current_T
+            ewma_d = (alpha * bar_mean_d) + ((1.0 - alpha) * ewma_d)
+
+            current_imbalance = 0.0
+            current_T = 0
             current_bar_id += 1
-            cummulative_sum = 0.0
 
-    return bar_ids
+    return bar_ids, thresholds[:current_bar_id + 1]
 ```
 
 With the accumulator function defined, we can finally implement an optimized imbalance bar calculation. The aggregation of features and daily ticks is exactly the same as in the previous tick bar calculations.
@@ -515,8 +552,28 @@ daily_ticks = (
 )
 ```
 
+We also need to tune the `init_T` and `init_d` parameters. We can set the `init_T` as the number taken for the timestamp tick count. The `init_d` can be calculate as the average of the absolute values of signed dollar column. Implemented in code:
+
+```python
+init_T = float(bin_size)
+init_d = (
+    prep_df.lazy()
+    .select(pl.col("signed_dollar").mean().abs())
+    .collect()
+    .item()
+)
+```
+
 Because the output is in exactly the same form as other tick bar dataframes, we can feed it through the same plotting functions implemented earlier. Here is the difference between the normal dollar volume plot and the imbalance one:
 
 ![image](./output/ex2-dollar-ticks.png)
 
 ![image](./output/ex2-dollar-imbalance-ticks.png)
+
+The plot for threshold looks like this.
+
+![image](./output/ex2-dollar-imbalance-threshold.png)
+
+What is interesting is that the bars break with adaptive threshold. Earlier I have tested it with the static one, one the results were very similar to the results from standard dollar volume bars. Using the adaptive threshold breaks it. A bar closes exactly when its |imbalance| crosses the threshold, so each sample of $|E[d]|$ is at least threshold / T. Every threshold therefore pushes the next estimate up, and it feeds on itself.
+
+
