@@ -19,7 +19,7 @@ To better understand the tick system, I have decided to fetch the E-mini S&P 500
 
 - `publisher_id` - the ID of the publisher. Because we deal with the S&P 500, the publisher is always CME Globex.
 
-- `instrument_id` - the ID of the instrument being traded. It is not constant even to we analyse a single symbol E-mini S&P 500. This happens because of the index expiration date, which forces the index to rollover to the new instrument, therefore changing the id. The E-mini was introduced because the value of the original contract was too high, and a change of one tick made a big difference. The E-mini is worth one-fifth of what the "original" contract was worth. The original S&P 500 contract was discontinued.
+- `instrument_id` - the ID of the instrument being traded. It is not constant even though we analyse a single symbol, the E-mini S&P 500. This happens because of the contract expiration date, which forces the index to roll over to the new instrument, therefore changing the ID. The E-mini was introduced because the value of the original contract was too high, and a change of one tick made a big difference. The E-mini is worth one-fifth of what the "original" contract was worth. The original S&P 500 contract was discontinued.
 
 - `action` - because we fetched trade data, it will always be `T` (trade).
 
@@ -27,7 +27,7 @@ To better understand the tick system, I have decided to fetch the E-mini S&P 500
 
 - `depth` - the book level the trade happened at (always 0 for trades). When an order is bigger than what is available at the current price, it is split into suborders, each matched at depth 0 until the contract is fulfilled.
 
-- `price` - the trade price in index points (1 point = \$50 per contract). For the S&P 500 data, the value always moves in 0.25 increments and each point is worth \$50 (so the 0.25 increment is worth \$12.50). This does not apply to individual stocks. Commonly listed stocks priced over \$1.00 can only move in \$0.01 increments (governed by the US Stock Exchange). This is the tick size for individual stocks: the price cannot move in smaller increments. So how is the connection to the actual S&P 500 companies made? It is made using a mathematical expiration rule and algorithmic arbitrage. The first thing is the actual calculation of the S&P 500. It is a market-capitalization-weighted average of 500 large US companies. It is represented by:
+- `price` - the trade price in index points (1 point = \$50 per contract). For the S&P 500 data, the value always moves in 0.25 increments and each point is worth \$50 (so the 0.25 increment is worth \$12.50). This does not apply to individual stocks. Commonly listed stocks priced over \$1.00 can only move in \$0.01 increments (governed by the SEC Reg NMS, Rule 612). This is the tick size for individual stocks: the price cannot move in smaller increments. So how is the connection to the actual S&P 500 companies made? It is made using a mathematical expiration rule and algorithmic arbitrage. The first thing is the actual calculation of the S&P 500. It is a market-capitalization-weighted average of 500 large US companies. It is represented by:
 
   $$
       \text{Index} = \frac{1}{D}\sum_{i=1}^{500} P_i Q_i,
@@ -95,7 +95,7 @@ ticks = (
 This code produces a dataframe that stores, in each row, the OHLCV data we are interested in. To see how different tick types evolve over the weeks, we can also aggregate how many ticks were produced each week.
 
 ```python
-weekly_ticks = (
+daily_ticks = (
     ticks
     .group_by_dynamic("ts_datetime", every=agg_bin_size)
     .agg(
@@ -230,14 +230,13 @@ By creating another simple plotting function and visualizing the `price` vs. `co
 
 ### Assessing the stability of tick plots
 
-Because I have fetched only 6 months of data, I have decided to plot the daily volumes and then asses the stability of the tick plots. The first idea is to take the `diff()` between the tick count columns and calculate its' mean and std. This would is the wrong approach, because calculating one communal mean and std masks the small movements of the market. Analysing the overall mean of the deltas will only give us the overall trend in the market and won't provide any information about local variablity. The same goes for the standard deviation. Thats why we use and plot rolling metrics. In those examples I plotted the values with windows size $\in \{5, 10, 15 \}. Of course the longer the window, the more smoothing will be present on the graph. The code which calculates rolling metrics looks like this:
+Because I have fetched only 6 months of data, I have decided to plot the daily bar counts and then assess the stability of the tick plots. The first idea is to take the `diff()` of the tick count column and calculate its mean and std. This would be the wrong approach, because calculating one common mean and std masks the small movements of the market. Analysing the overall mean of the deltas will only give us the overall trend in the market and won't provide any information about local variability. The same goes for the standard deviation. That's why we use and plot rolling metrics. In these examples, I plotted the values with window sizes $\in \{5, 10, 15\}$. Of course, the longer the window, the more smoothing will be present on the graph. The code that calculates the rolling metrics looks like this:
 
 ```python
-
 for window_size in [5, 10, 15]:
     metrics = (
         daily_tick_count.lazy()
-        # calculate the deltas, take care of first null
+        # calculate the deltas, take care of the first null
         .with_columns(
             deltas=pl.col("tick_count").diff().fill_null(0.0)
         )
@@ -251,7 +250,7 @@ for window_size in [5, 10, 15]:
     plot(metrics, ...)
 ```
 
-Which yields:
+This yields:
 
 ![image](./output/daily-stability-5.png)
 
@@ -259,27 +258,27 @@ Which yields:
 
 ![image](./output/daily-stability-15.png)
 
-I think that the dollar plots look pretty good and maybe better than the rest. I think that it might be because given a set of investors, they operate with a constant amount of capital through the instrument. And because the capital is defined by the price in USD, it should stay pretty constant througout the entire period.
+I think the dollar plots look pretty good, maybe better than the rest. This might be because a given set of investors operates with a constant amount of capital in the instrument. And because that capital is defined in USD, it should stay fairly constant throughout the entire period.
 
-### Assesing the corelations
+### Assessing the correlations
 
-First we need to define what the returns are. Let's distinct them into three types:
+First, we need to define what returns are. Let's distinguish three types:
 
-- Simple dollar amount return. Given the price of an asset at times $t-1$ and $t$, we calculate a delta:
+- Simple dollar return. Given the price of an asset at times $t-1$ and $t$, we calculate a delta:
 
   $$
       R_t = P_t - P_{t-1}.
   $$
 
-- Percentage returns. This is the most often used return description method. It is calculated using:
+- Percentage returns. This is the most commonly used way of describing returns. It is calculated using:
 
   $$
       R_t = \frac{P_t - P_{t-1}}{P_{t-1}}.
   $$
 
-  It is easily interpretable for humans but its a skewed data type. We can image that if the stock price drops 50% then it has to go back up a 100% to make up for the drop. This means that the returns doesn't add up to 0 over the periods when absolute difference between start and end points is 0.
+  It is easily interpretable for humans, but it is a skewed data type. Imagine that the stock price drops 50%: it then has to go back up 100% to make up for the drop. This means that the returns don't add up to 0 over a period in which the start and end prices are equal.
 
-- Log returns. It makes the returns perfectly interpretable for ML models. It is described using:
+- Log returns. They make the returns perfectly interpretable for ML models. They are described using:
 
   $$
       R_t = \ln \left(\frac{P_t}{P_{t - 1}} \right) = \ln P_t - \ln P_{t - 1}.
@@ -287,9 +286,9 @@ First we need to define what the returns are. Let's distinct them into three typ
 
   We can simply add log returns together across time to calculate total returns over a week or a month. ML algorithms require stationary data (constant mean and variance over time). Converting an exponentially growing price series into log returns flattens it into a stable, stationary series that algorithms can actually interpret.
 
-Okay back to the returns correlation topic. We can interpret **serial correlation** (or autocorrelation) as a statistical measurement of how heavily a variable's current value is related to its past values over a specific time lag. Basically it defines a momentum over time. Positive correlations singnals that the uprising stock price will likely be followed by another rise.
+Okay, back to the topic of return correlation. We can interpret **serial correlation** (or autocorrelation) as a statistical measure of how strongly a variable's current value is related to its past values at a specific time lag. Basically, it describes momentum over time. A positive correlation signals that a rising stock price will likely be followed by another rise.
 
-The serial correlation of returns $R$ at a given lag $k$ is calculated using the Pearson correlation formula against its own lagged series:
+The serial correlation (autocorrelation - ACF) of returns $R$ at a given lag $k$ is calculated using the Pearson correlation formula against its own lagged series:
 
 $$
     r_k = \frac{\sum_{t=k+1}^{T} (R_t - \bar{R})(R_{t-k} - \bar{R})}{\sum_{t=1}^{T} (R_t - \bar{R})^2},
@@ -297,7 +296,7 @@ $$
 
 where:
 
-- $R_t$ is the return in time $t$,
+- $R_t$ is the return at time $t$,
 - $R_{t - k}$ is the return shifted $k$ steps backward,
 - $\bar{R}$ is the mean return.
 
@@ -311,11 +310,11 @@ for lag in [1, 5, 10, 15, 20]:
         .with_columns(
             log_return=(pl.col("close") / pl.col("close").shift(1)).log()
         )
-        # create lagged return column
+        # create the lagged return column
         .with_columns(
             lagged_return=pl.col("log_return").shift(lag)
         )
-        # use built-in pl.corr method to calculate the correlation between columns
+        # use the built-in pl.corr method to calculate the correlation between the columns
         .select(
             serial_corr=pl.corr("log_return", "lagged_return", method="pearson")
         )
@@ -351,11 +350,11 @@ Lag value k = 20
         Dollar serial correlation:    0.0108
 ```
 
-I feel like the dollar correlations are the smallest or at least have the smallest variability when looking at the different lag coeff values.
+I feel like the dollar correlations are the smallest, or at least have the smallest variability across the different lag values.
 
 ### Checking the "normality" of the returns distribution
 
-We can do a Jarque-Bera test on the returns to check if it performs like a normal distribution. To do that we need to calculate two metric of our returns, skewness and kurtosis. The normal distribution has skewness equal to $0$ and kurtosis equal to $3$, the Jarque-Baro test basically calculates the distance from those values and weights them creating a perfect score equal to $0$ which should appear as we analyse close to inf number of samples. If the distribution deviates from normal it will move further from $0$. Quick refresher of how to calculate those values:
+We can run a Jarque-Bera test on the returns to check whether they behave like a normal distribution. To do that, we need to calculate two metrics of our returns: skewness and kurtosis. The normal distribution has skewness equal to $0$ and kurtosis equal to $3$. If the distribution deviates from normal, the score will move further from $0$. A quick refresher on how to calculate those values:
 
 Skewness:
 
@@ -363,13 +362,13 @@ $$
     \text{S} = \mathbb{E} \left[ \left( \frac{X - \mu}{\sigma} \right)^3 \right].
 $$
 
-If $\sigma$ and $\mu$ is finite, we can expand the formula to get:
+If $\sigma$ and $\mu$ are finite, we can expand the formula to get:
 
 $$
     \text{S}= \frac{1}{\sigma^3} \left(  \mathbb{E}X^3 - 3\mu  \mathbb{E} X^2 + 2\mu^3 \right).
 $$
 
-Because we take a sample from a distribution of values, we need to use the biased estimator. The same for Kurtosis:
+Because the JB test is defined with the plain sample moments (which are biades), we need to take that into account. The same goes for kurtosis:
 
 $$
     \text{K} = \mathbb{E} \left[ \left( \frac{X - \mu}{\sigma} \right)^4 \right]
@@ -387,8 +386,121 @@ The further the value of this metric is from 0, the further the distribution is 
 Jarque-Bera test
         Value for timestamp ticks is 6726.59
         Value for volume ticks is 7862.27
-        Value for dollars ticks is 7620.15
+        Value for dollar ticks is 7620.15
 ```
 
-As we can see the distribution of the returns doesn't come from the normal distribution, for this hypothesis to hold the JB values should be way below 6 and close to 0.
+As we can see, the returns don't come from a normal distribution. For this hypothesis to hold, the JB values should be well below 6 and close to 0.
 
+### Dollar imbalance bars
+
+The main motivation behind using dollar imbalance bars is their resistance to noisy HFT trades. We can imagine that a bar gets triggered not after a given volume or number of assets has been moved, but when the cumulative sum crosses some threshold. Dollar imbalance bars are designed like this. Given the prices at points $t$ and $t-1$, we set the values:
+
+- $P_t > P_{t-1}$ then $b_t=1$
+
+- $P_t < P_{t-1}$ then $b_t=-1$
+
+- $P_t = P_{t-1}$ the tick inherits the sign of the previous trade ($b_t = b_{t-1}$).
+
+Then we create a signed dollar volume metric for a given trade as:
+
+$$
+    d_t = b_t \times (p_t v_t \cdot 50),
+$$
+
+where $p_t$ is the price, $v_t$ is the volume, and 50 is the dollar value of one S&P 500 point. Then we create the imbalance accumulator $\theta_T$, which is:
+
+$$
+  \theta_T = \sum_{t=1}^T d_t.
+$$
+
+We accumulate the value of $\theta$ until some threshold $|\theta_T| > \theta_M$ is reached, which mints the bar (ends the previous one, opens the next one, and calculates the metrics on the accumulated trades, i.e. OHLCV). After the threshold is met, the accumulator is reset to 0. How do we implement this in code?
+
+First, we need to evaluate the $d_t$ values for each trade:
+
+```python
+prep_df = (
+    df.lazy()
+    # Differences between subsequent trades
+    .with_columns(
+        price_diff=pl.col("continous_price").diff()
+    )
+    # Extract the signs of the differences
+    .with_columns(
+        tick_sign=pl.when(pl.col("price_diff") > 0).then(1)
+        .when(pl.col("price_diff") < 0).then(-1)
+        .otherwise(None)
+    )
+    # Forward fill the values which didn't change the price
+    .with_columns(
+        tick_sign=(
+            pl.col("tick_sign")
+            .forward_fill()
+            .fill_null(1)
+        )
+    )
+    # Create the signed dollar volume column
+    .with_columns(
+        signed_dollar=(pl.col("tick_sign") * pl.col("size") * pl.col("price") * 50.0)
+    )
+    .drop("price_diff")
+    .collect()
+)
+```
+
+Then we need to run the accumulation logic, which isn't a standard function in Polars. To achieve better speed, we will extract the column, convert it to a NumPy array, and implement the function with Numba's `@njit` decorator.
+
+```python
+@njit
+def compute_imbalance_bars_ids(
+    signed_dollars: npt.NDArray[np.float64],
+    threshold: float
+) -> npt.NDArray[np.int64]:
+
+    n = len(signed_dollars)
+    bar_ids = np.empty(n, dtype=np.int64)
+
+    current_bar_id = 0
+    cummulative_sum = 0.0
+
+    for i in range(n):
+
+        cummulative_sum += signed_dollars[i]
+        bar_ids[i] = current_bar_id
+
+        if abs(cummulative_sum) >= threshold:
+            current_bar_id += 1
+            cummulative_sum = 0.0
+
+    return bar_ids
+```
+
+With the accumulator function defined, we can finally implement an optimized imbalance bar calculation. The aggregation of features and daily ticks is exactly the same as in the previous tick bar calculations.
+
+```python
+signed_dollar_arr = (
+    prep_df.select(pl.col("signed_dollar"))
+    .to_numpy()
+    .flatten()
+)
+
+bar_ids = compute_imbalance_bars_ids(signed_dollar_arr, threshold)
+
+ticks = (
+    prep_df
+    .with_columns(
+        bin=pl.Series("bin", bar_ids)
+    )
+    .group_by("bin")
+    ...
+)
+
+daily_ticks = (
+    ...
+)
+```
+
+Because the output is in exactly the same form as other tick bar dataframes, we can feed it through the same plotting functions implemented earlier. Here is the difference between the normal dollar volume plot and the imbalance one:
+
+![image](./output/ex2-dollar-ticks.png)
+
+![image](./output/ex2-dollar-imbalance-ticks.png)
