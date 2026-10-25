@@ -368,16 +368,32 @@ $$
     \text{S}= \frac{1}{\sigma^3} \left(  \mathbb{E}X^3 - 3\mu  \mathbb{E} X^2 + 2\mu^3 \right).
 $$
 
-Because the JB test is defined with the plain sample moments (which are biades), we need to take that into account. The same goes for kurtosis:
+Because the JB test is defined with the plain sample moments (which are biased), we need to take that into account. The same goes for kurtosis:
 
 $$
     \text{K} = \mathbb{E} \left[ \left( \frac{X - \mu}{\sigma} \right)^4 \right]
 $$
 
-The Jarque-Bera normality test is calculated by:
+In practice we don't know $\mu$ and $\sigma$, so we estimate both metrics from our $n$ returns $x_1, \dots, x_n$. Let $\bar{x} = \frac{1}{n}\sum_{i=1}^{n} x_i$ be the sample mean and let
 
 $$
-    \text{JB} = \frac{n}{6} \left(\text{S}^2 + \frac{1}{4}(K - 3)^2 \right).
+    m_k = \frac{1}{n} \sum_{i=1}^{n} (x_i - \bar{x})^k
+$$
+
+be the $k$-th sample central moment (so $m_2$ is the sample variance). The sample skewness and kurtosis are:
+
+$$
+    \hat{\text{S}} = \frac{m_3}{m_2^{3/2}} = \frac{\frac{1}{n}\sum_{i=1}^{n} (x_i - \bar{x})^3}{\left( \frac{1}{n}\sum_{i=1}^{n} (x_i - \bar{x})^2 \right)^{3/2}},
+    \qquad
+    \hat{\text{K}} = \frac{m_4}{m_2^{2}} = \frac{\frac{1}{n}\sum_{i=1}^{n} (x_i - \bar{x})^4}{\left( \frac{1}{n}\sum_{i=1}^{n} (x_i - \bar{x})^2 \right)^{2}}.
+$$
+
+They are biased because every moment divides by $n$ (not $n-1$) and uses the estimated mean $\bar{x}$ instead of the true $\mu$. In Polars these are `pl.col(...).skew()` and `pl.col(...).kurtosis(fisher=False)` (both default to `bias=True`). Note that plain `kurtosis()` returns the *excess* kurtosis $\hat{\text{K}} - 3$.
+
+The Jarque-Bera normality test is calculated from these sample estimates:
+
+$$
+    \text{JB} = \frac{n}{6} \left(\hat{\text{S}}^2 + \frac{1}{4}(\hat{\text{K}} - 3)^2 \right).
 $$
 
 The further the value of this metric is from 0, the further the distribution is from normal. For our returns we get:
