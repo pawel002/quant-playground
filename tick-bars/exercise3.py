@@ -3,7 +3,9 @@ from pathlib import Path
 import polars as pl
 import numpy as np
 
-from plots import plot_omegas
+from statsmodels.tsa.stattools import adfuller
+
+from plots import plot_omegas, plot_spread, plot_adf
 
 def read_dataset(filename: str, columns: list[str]) -> pl.DataFrame:
     path = Path(__file__).parent.parent / "data" / filename
@@ -155,6 +157,13 @@ def calculate_omegas(bars: pl.DataFrame):
     return K, omegas
 
 
+def adf_test(series: np.ndarray) -> dict:
+    """Augmented Dickey-Fuller test. H0: the series has a unit root (is NOT stationary).
+    A test statistic below the critical value (p-value < 0.05) rejects H0 -> stationary."""
+    stat, pvalue, lags, nobs, crit, _ = adfuller(series, regression="c", autolag="AIC", result_object=False)
+    return {"stat": stat, "pvalue": pvalue, "lags": lags, "nobs": nobs, "crit": crit}
+
+
 def main():
     stock_columns = ["ts_recv", "instrument_id", "price", "size"]
     exchange_columns = ["ts_event", "close"]
@@ -222,6 +231,24 @@ def main():
         omega_niy=pl.Series(omegas[:, 1]),
     )
     plot_omegas(bars, "output/ex3-omegas.png")
+    plot_spread(bars, "output/ex3-spread.png")
+
+    # part c): is the spread stationary? Compare with each leg on its own over the same bars.
+    spread_bars = bars.filter(pl.col("K").is_not_nan())
+    series = {
+        "Spread K": spread_bars["K"].to_numpy(),
+        # roll-free log prices: cumulative within-segment log returns
+        "ES alone": spread_bars["es_ret"].fill_null(0.0).cum_sum().to_numpy(),
+        "NIY alone": spread_bars["niy_ret"].fill_null(0.0).cum_sum().to_numpy(),
+    }
+    results = {name: adf_test(x) for name, x in series.items()}
+
+    print("ADF test (H0: unit root / not stationary)")
+    for name, r in results.items():
+        print(f"\t{name:<10} stat = {r['stat']:7.3f}   p-value = {r['pvalue']:.4f}   lags = {r['lags']:3d}   n = {r['nobs']}")
+    print("\tcritical values:", {k: round(v, 3) for k, v in results["Spread K"]["crit"].items()})
+
+    plot_adf(spread_bars, results, "output/ex3-adf.png")
 
 
 

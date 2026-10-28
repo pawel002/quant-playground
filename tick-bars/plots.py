@@ -146,6 +146,69 @@ def plot_omegas(bars: pl.DataFrame, output_path: str | Path) -> Path:
     return save(fig, output_path)
 
 
+def plot_spread(bars: pl.DataFrame, output_path: str | Path) -> Path:
+    """
+    Value K of $1 invested in the PCA-weighted ES/NIY basket (the ETF trick output).
+    `bars` needs `ts_start`, `K` and `segment`; dotted lines mark the rolls (segment changes).
+    """
+    plt.switch_backend("Agg")
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    spread = bars.filter(pl.col("K").is_not_nan())
+    rolls = bars.filter(pl.col("segment") != pl.col("segment").shift(1))["ts_start"]
+
+    ax.plot(spread["ts_start"], spread["K"], color="#2a78d6", linewidth=1)
+    ax.axhline(1.0, color="#8a8984", linewidth=0.8)
+    for roll in rolls:
+        ax.axvline(roll, color="#8a8984", linewidth=0.8, linestyle=":")
+
+    ax.set_ylabel("K (value of $1)")
+    ax.set_title("ES / NIY spread from the ETF trick (dotted: rolls)")
+    ax.grid(True, alpha=0.3)
+
+    return save(fig, output_path)
+
+
+def plot_adf(spread_bars: pl.DataFrame, results: dict[str, dict], output_path: str | Path) -> Path:
+    """
+    Top: the spread K around its mean, with a +-2 std band.
+    Bottom: ADF test statistic of each series vs the critical values.
+    A bar left of a dashed line rejects "not stationary" at that confidence level.
+    `results` maps a series name to the output of `adf_test` (keys: stat, pvalue, crit).
+    """
+    plt.switch_backend("Agg")
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), gridspec_kw={"height_ratios": [3, 2]})
+
+    k = spread_bars["K"]
+    mean, std = k.mean(), k.std()
+    ax1.plot(spread_bars["ts_start"], k, color="#2a78d6", linewidth=1)
+    ax1.axhline(mean, color="#52514e", linewidth=1)
+    ax1.axhspan(mean - 2 * std, mean + 2 * std, color="#2a78d6", alpha=0.08)
+    spread = results["Spread K"]
+    ax1.set_title(f"Spread K: ADF statistic {spread['stat']:.2f}, p-value {spread['pvalue']:.3f}")
+    ax1.set_ylabel("K (value of $1)")
+    ax1.grid(True, alpha=0.3)
+
+    names = list(results)
+    stats = [results[n]["stat"] for n in names]
+    colors = ["#2a78d6" if n == "Spread K" else "#8a8984" for n in names]
+    ax2.barh(names, stats, color=colors, height=0.5)
+    for n, s in zip(names, stats):
+        # label inside the bar, just right of its (negative) end
+        ax2.annotate(f"{s:.2f}  (p={results[n]['pvalue']:.3f})", (s, n), xytext=(6, 0),
+                     textcoords="offset points", ha="left", va="center", fontsize=8, color="white")
+    for level, value in spread["crit"].items():
+        ax2.axvline(value, color="#52514e", linewidth=1, linestyle="--")
+        # x in data units, y just above the axes
+        ax2.text(value, 1.02, f"{level} critical", transform=ax2.get_xaxis_transform(),
+                 ha="center", fontsize=8, color="#52514e")
+    ax2.invert_yaxis()
+    ax2.set_xlabel("ADF test statistic (more negative = more evidence of stationarity)")
+    ax2.grid(True, axis="x", alpha=0.3)
+
+    return save(fig, output_path)
+
+
 def save(fig, output_path: str | Path) -> Path:
     """Save a figure relative to this folder and close it."""
     out_path = Path(output_path)
