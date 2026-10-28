@@ -576,4 +576,6 @@ The plot for threshold looks like this.
 
 What is interesting is that the bars break with adaptive threshold. Earlier I have tested it with the static one, one the results were very similar to the results from standard dollar volume bars. Using the adaptive threshold breaks it. A bar closes exactly when its |imbalance| crosses the threshold, so each sample of $|E[d]|$ is at least threshold / T. Every threshold therefore pushes the next estimate up, and it feeds on itself.
 
+### Applying the ETF trick to a portfolio in different currencies
 
+First let's describe what an ETF is. The acronym stands for Exchange-Traded Fund. It is a pooled investment vehicle that holds a basket of securities (such as stocks, bonds, or commodities) and trades on a stock exchange just like a regular individual stock. When you buy a share of an ETF, you are buying a proportional slice of that entire basket, allowing you to invest in hundreds or thousands of companies through a single transaction.

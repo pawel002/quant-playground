@@ -115,6 +115,37 @@ def plot_imbalance_threshold(result_df: pl.DataFrame, output_path: str | Path) -
     return save(fig, output_path)
 
 
+def plot_omegas(bars: pl.DataFrame, output_path: str | Path) -> Path:
+    """
+    PCA weights at each rebalance, as a share of capital: omega_i / sum(|omega|).
+    `bars` needs `ts_start`, `omega_es` and `omega_niy` (NaN on bars without a rebalance).
+    Drawn as steps, because the weights stay fixed until the next rebalance.
+    """
+    plt.switch_backend("Agg")
+    fig, ax = plt.subplots(figsize=(10, 4))
+
+    weights = (
+        bars
+        .filter(pl.col("omega_es").is_not_nan())
+        .with_columns(gross=pl.col("omega_es").abs() + pl.col("omega_niy").abs())
+        .with_columns(
+            es_share=pl.col("omega_es") / pl.col("gross"),
+            niy_share=pl.col("omega_niy") / pl.col("gross"),
+        )
+    )
+
+    ax.step(weights["ts_start"], weights["es_share"], where="post", color="#2a78d6", linewidth=1.5, label="ES")
+    ax.step(weights["ts_start"], weights["niy_share"], where="post", color="#eb6834", linewidth=1.5, label="NIY")
+    ax.axhline(0, color="#8a8984", linewidth=0.8)
+
+    ax.set_ylabel("Share of capital")
+    ax.set_title("PCA weights at each rebalance")
+    ax.legend(loc="center right")
+    ax.grid(True, alpha=0.3)
+
+    return save(fig, output_path)
+
+
 def save(fig, output_path: str | Path) -> Path:
     """Save a figure relative to this folder and close it."""
     out_path = Path(output_path)
