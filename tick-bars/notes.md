@@ -650,3 +650,4 @@ def es_dollar_bars(es: pl.DataFrame) -> pl.DataFrame:
 
 bars = es_dollar_bars(es_trades)
 ```
+
