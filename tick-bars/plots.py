@@ -169,12 +169,12 @@ def plot_spread(bars: pl.DataFrame, output_path: str | Path) -> Path:
     return save(fig, output_path)
 
 
-def plot_adf(spread_bars: pl.DataFrame, results: dict[str, dict], output_path: str | Path) -> Path:
+def plot_adf(spread_bars: pl.DataFrame, results: dict, output_path: str | Path) -> Path:
     """
     Top: the spread K around its mean, with a +-2 std band.
     Bottom: ADF test statistic of each series vs the critical values.
     A bar left of a dashed line rejects "not stationary" at that confidence level.
-    `results` maps a series name to the output of `adf_test` (keys: stat, pvalue, crit).
+    `results` maps a series name to an `AdfResult` (statistic, p_value, critical_values).
     """
     plt.switch_backend("Agg")
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 7), gridspec_kw={"height_ratios": [3, 2]})
@@ -185,19 +185,19 @@ def plot_adf(spread_bars: pl.DataFrame, results: dict[str, dict], output_path: s
     ax1.axhline(mean, color="#52514e", linewidth=1)
     ax1.axhspan(mean - 2 * std, mean + 2 * std, color="#2a78d6", alpha=0.08)
     spread = results["Spread K"]
-    ax1.set_title(f"Spread K: ADF statistic {spread['stat']:.2f}, p-value {spread['pvalue']:.3f}")
+    ax1.set_title(f"Spread K: ADF statistic {spread.statistic:.2f}, p-value {spread.p_value:.3f}")
     ax1.set_ylabel("K (value of $1)")
     ax1.grid(True, alpha=0.3)
 
     names = list(results)
-    stats = [results[n]["stat"] for n in names]
+    stats = [results[n].statistic for n in names]
     colors = ["#2a78d6" if n == "Spread K" else "#8a8984" for n in names]
     ax2.barh(names, stats, color=colors, height=0.5)
     for n, s in zip(names, stats):
         # label inside the bar, just right of its (negative) end
-        ax2.annotate(f"{s:.2f}  (p={results[n]['pvalue']:.3f})", (s, n), xytext=(6, 0),
+        ax2.annotate(f"{s:.2f}  (p={results[n].p_value:.3f})", (s, n), xytext=(6, 0),
                      textcoords="offset points", ha="left", va="center", fontsize=8, color="white")
-    for level, value in spread["crit"].items():
+    for level, value in spread.critical_values.items():
         ax2.axvline(value, color="#52514e", linewidth=1, linestyle="--")
         # x in data units, y just above the axes
         ax2.text(value, 1.02, f"{level} critical", transform=ax2.get_xaxis_transform(),

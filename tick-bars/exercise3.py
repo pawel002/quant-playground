@@ -1,56 +1,65 @@
+"""AFML exercise 2.3: the ETF trick on a PCA-weighted ES / NIY basket, then an ADF test of the spread.
+
+ES  - E-mini S&P 500 futures (USD)
+NIY - Nikkei 225 futures in yen, our stand-in for the Euro Stoxx 50, converted to USD with 6J
+
+    uv run python tick-bars/exercise3.py
+"""
+
+from dataclasses import dataclass
 from pathlib import Path
 
-import polars as pl
 import numpy as np
-
+import polars as pl
 from statsmodels.tsa.stattools import adfuller
 
-from plots import plot_omegas, plot_spread, plot_adf
+from plots import plot_adf, plot_omegas, plot_spread
 
-def read_dataset(filename: str, columns: list[str]) -> pl.DataFrame:
-    path = Path(__file__).parent.parent / "data" / filename
-    return pl.read_parquet(path, columns=columns)
-    
+ES_POINT_VALUE_USD = 50.0    # one ES index point is worth $50 per contract
+NIY_POINT_VALUE_JPY = 500.0  # one NIY index point is worth ¥500 per contract
+BAR_DOLLARS = 10e8           # ES dollar volume per bar
+COV_WINDOW = 500             # bars of returns used to estimate the covariance for the PCA weights
+REBALANCE_EVERY = "1w"       # besides every roll, re-estimate the weights at this interval
 
-def roll_times(df: pl.DataFrame) -> pl.Series:
+
+@dataclass(frozen=True)
+class AdfResult:
+    statistic: float
+    p_value: float
+    lags: int
+    n_obs: int
+    critical_values: dict[str, float]
+
+
+# --- bars ---------------------------------------------------------------------------------------
+
+def read_trades(path: Path) -> pl.DataFrame:
+    return pl.read_parquet(path, columns=["ts_recv", "instrument_id", "price", "size"])
+
+
+def roll_times(trades: pl.DataFrame) -> pl.Series:
+    """Timestamp of the first trade of every new contract."""
     return (
-        df.filter(
-            pl.col("instrument_id") != pl.col("instrument_id").shift(1)
-        )
+        trades
+        .filter(pl.col("instrument_id") != pl.col("instrument_id").shift())
         .get_column("ts_recv")
     )
 
 
-def insert_roll_index(sp500: pl.DataFrame, niy: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
-
-    # 1. Combine, deduplicate, and sort the roll dates
-    roll_series = pl.concat(
-        [roll_times(sp500), roll_times(niy)]
-    ).unique().sort()
-
-    # 2. Use the evaluated Series (df["col"]) instead of the lazy Expression (pl.col)
-    # segment before first rollover gets index 0, before second 1, and so on...
-    return (
-        sp500
-        .with_columns(
-            segment=roll_series.search_sorted(sp500["ts_recv"], side="right")
-        )
-    ), (
-        niy
-        .with_columns(
-            segment=roll_series.search_sorted(niy["ts_recv"], side="right")
-        )
+def with_segment(trades: pl.DataFrame, rolls: pl.Series) -> pl.DataFrame:
+    """Number the stretches between rolls: 0 before the first roll, 1 after it, and so on.
+    side="right" puts the first trade of a new contract into the new segment."""
+    return trades.with_columns(
+        segment=rolls.search_sorted(trades["ts_recv"], side="right")
     )
 
 
-def get_bars(df: pl.DataFrame) -> pl.DataFrame:
-
+def es_dollar_bars(es: pl.DataFrame) -> pl.DataFrame:
+    """ES dollar bars, the bar clock shared by both instruments. A bar never spans a roll."""
+    dollar_volume = pl.col("price") * pl.col("size") * ES_POINT_VALUE_USD
     return (
-        df
-        # separate the sp500 into dollar volume beans
-        .with_columns(
-            bin=((pl.col("price") * pl.col("size") * 50).cum_sum() // 10e9)
-        )
+        es
+        .with_columns(bin=dollar_volume.cum_sum() // BAR_DOLLARS)
         .group_by("segment", "bin")
         .agg(
             ts_start=pl.col("ts_recv").first(),
@@ -60,196 +69,181 @@ def get_bars(df: pl.DataFrame) -> pl.DataFrame:
         )
         .sort("ts_start")
         .with_row_index("bar_id")
+        .drop("bin")
     )
 
 
-def get_joined_bars(sp500_bars: pl.DataFrame, niy: pl.DataFrame) -> pl.DataFrame:
-
+def add_niy_prices(bars: pl.DataFrame, niy: pl.DataFrame) -> pl.DataFrame:
+    """NIY open and close inside each ES bar. Every NIY trade goes to the latest ES bar that
+    started before it, within the same segment. Bars without an NIY trade keep the last NIY price."""
     niy_bars = (
         niy
         .join_asof(
-            sp500_bars.select("ts_start", "bar_id", "segment"),
+            bars.select("ts_start", "bar_id", "segment"),
             left_on="ts_recv",
             right_on="ts_start",
             by="segment",
             strategy="backward",
+            check_sortedness=False,  # both sides are sorted by time; polars can't verify it with `by`
         )
         .drop_nulls("bar_id")
         .group_by("bar_id")
-        .agg(
-            niy_open=pl.col("price").first(),
-            niy_close=pl.col("price").last(),
-        )
+        .agg(niy_open=pl.col("price").first(), niy_close=pl.col("price").last())
     )
-
     return (
-        sp500_bars
+        bars
         .join(niy_bars, on="bar_id", how="left")
-        .with_columns(
-            pl.col("niy_close").forward_fill().over("segment")
-        )
-        .with_columns(
-            pl.col("niy_open").fill_null(pl.col("niy_close").shift().over("segment"))
-        )
+        .with_columns(pl.col("niy_close").forward_fill().over("segment"))
+        .with_columns(pl.col("niy_open").fill_null(pl.col("niy_close").shift().over("segment")))
     )
 
+
+def add_point_values(bars: pl.DataFrame, usd_jpy: pl.DataFrame) -> pl.DataFrame:
+    """phi: the USD value of one index point. NIY uses yesterday's USD/JPY close (no look-ahead)."""
+    fx = usd_jpy.select(
+        known_from=pl.col("ts_event").dt.offset_by("1d"),
+        usd_per_jpy=pl.col("close"),
+    ).sort("known_from")
+    return (
+        bars
+        .join_asof(fx, left_on="ts_start", right_on="known_from", strategy="backward")
+        .with_columns(pl.col("usd_per_jpy").backward_fill())  # the first day has no "yesterday"
+        .with_columns(
+            es_phi=pl.lit(ES_POINT_VALUE_USD),
+            niy_phi=NIY_POINT_VALUE_JPY * pl.col("usd_per_jpy"),
+        )
+        .drop("known_from")
+    )
+
+
+def add_returns_and_rebalances(bars: pl.DataFrame) -> pl.DataFrame:
+    """Log returns that never span a roll (the first bar of a segment gets null), and the
+    rebalance flag: the last bar before every roll and the last bar of every period."""
+    period = pl.col("ts_start").dt.truncate(REBALANCE_EVERY)
+    is_last_before_roll = pl.col("segment") != pl.col("segment").shift(-1)
+    is_last_of_period = period != period.shift(-1)
+    return bars.with_columns(
+        es_ret=pl.col("es_close").log().diff().over("segment"),
+        niy_ret=pl.col("niy_close").log().diff().over("segment"),
+        rebalance=(is_last_before_roll | is_last_of_period).fill_null(False),
+    )
+
+
+# --- ETF trick ----------------------------------------------------------------------------------
 
 def pca_weights(cov: np.ndarray, risk_dist: np.ndarray | None = None, risk_target: float = 1.0) -> np.ndarray:
-    """AFML Snippet 2.1: weights that spread the portfolio's risk across principal components."""
-    # eigen-decomposition of the covariance matrix: cov = e_vec @ diag(e_val) @ e_vec.T
-    e_val, e_vec = np.linalg.eigh(cov)
+    """AFML Snippet 2.1: weights that spread the portfolio's risk across principal components.
+    By default all the risk goes on the smallest component, i.e. the hedged spread."""
+    eigenvalues, eigenvectors = np.linalg.eigh(cov)
+    order = eigenvalues.argsort()[::-1]  # largest first
+    eigenvalues, eigenvectors = eigenvalues[order], eigenvectors[:, order]
 
-    # sort the components from largest to smallest eigenvalue (eigh returns them ascending)
-    order = e_val.argsort()[::-1]
-    e_val, e_vec = e_val[order], e_vec[:, order]
-
-    # default: put all the risk on the last component (smallest eigenvalue) -> the spread
     if risk_dist is None:
-        risk_dist = np.zeros(cov.shape[0])
+        risk_dist = np.zeros(len(cov))
         risk_dist[-1] = 1.0
 
-    # beta_n = sigma * sqrt(R_n / lambda_n): how much to load on each component
-    loads = risk_target * np.sqrt(risk_dist / e_val)
-
-    # back from component coordinates to instrument weights: omega = W @ beta
-    w = e_vec @ loads
-
-    # eigenvectors are only defined up to a sign; keep the ES leg positive so the spread doesn't flip
-    return w if w[0] > 0 else -w
+    loads = risk_target * np.sqrt(risk_dist / eigenvalues)  # beta_n = sigma * sqrt(R_n / lambda_n)
+    weights = eigenvectors @ loads                          # omega = W @ beta
+    return weights if weights[0] > 0 else -weights          # eigenvectors have no fixed sign: keep ES long
 
 
-def calculate_omegas(bars: pl.DataFrame):
+def etf_trick(bars: pl.DataFrame) -> pl.DataFrame:
+    """AFML 2.4.1: K, the value of $1 held in the ES / NIY basket. At every rebalance the PCA weights
+    omega are re-estimated from the last COV_WINDOW bars and turned into holdings at the next bar's open.
+    Adds K, omega_es and omega_niy (NaN where there was no rebalance)."""
+    opens = bars.select("es_open", "niy_open").to_numpy()
+    closes = bars.select("es_close", "niy_close").to_numpy()
+    phi = bars.select("es_phi", "niy_phi").to_numpy()
+    returns = bars.select("es_ret", "niy_ret").to_numpy()
+    rebalance = bars["rebalance"].to_numpy()
 
-    o    = bars.select("es_open", "niy_open").to_numpy()
-    p    = bars.select("es_close", "niy_close").to_numpy()
-    phi  = bars.select("es_phi", "niy_phi").to_numpy()
-    rets = bars.select("es_ret", "niy_ret").to_numpy()
-    reb  = bars["rebalance"].to_numpy()
+    n_bars = len(bars)
+    K = np.full(n_bars, np.nan)
+    omegas = np.full((n_bars, 2), np.nan)
+    holdings = np.zeros(2)
+    started = rebalanced_last_bar = False
 
-    window, T = 500, len(bars)
-    K =      np.full(T, np.nan) 
-    omegas = np.full((T, 2), np.nan)
-    h =      np.zeros(2)
-
-    started = just_rebalanced = False
-
-    for t in range(T - 1):
-
+    for t in range(n_bars):
+        # 1. mark to market with the holdings set at the previous rebalance
         if started:
-            delta = p[t] - o[t] if just_rebalanced else p[t] - p[t - 1]
-            K[t] = K[t - 1] + np.sum(h * phi[t] * delta)
+            price_change = closes[t] - opens[t] if rebalanced_last_bar else closes[t] - closes[t - 1]
+            K[t] = K[t - 1] + holdings @ (phi[t] * price_change)
+        rebalanced_last_bar = False
 
-        if reb[t] and t > window:
-            r = rets[t - window + 1 : t + 1]
-            r = r[~np.isnan(r).any(axis=1)]
-
-            w = pca_weights(np.cov(r, rowvar=False))
+        # 2. rebalance: new weights from past returns only, new holdings at the next bar's open
+        if rebalance[t] and t + 1 >= COV_WINDOW and t + 1 < n_bars:
+            window = returns[t - COV_WINDOW + 1 : t + 1]
+            window = window[~np.isnan(window).any(axis=1)]
+            omega = pca_weights(np.cov(window, rowvar=False))
             if not started:
                 K[t], started = 1.0, True
+            holdings = omega * K[t] / (opens[t + 1] * phi[t] * np.abs(omega).sum())
+            omegas[t] = omega
+            rebalanced_last_bar = True
 
-            h = w * K[t] / (o[t + 1] * phi[t] * np.abs(w).sum())
-            omegas[t] = w
-            just_rebalanced = True
-
-        else:
-            just_rebalanced = False
-
-    return K, omegas
+    return bars.with_columns(K=K, omega_es=omegas[:, 0], omega_niy=omegas[:, 1])
 
 
-def adf_test(series: np.ndarray) -> dict:
-    """Augmented Dickey-Fuller test. H0: the series has a unit root (is NOT stationary).
-    A test statistic below the critical value (p-value < 0.05) rejects H0 -> stationary."""
-    stat, pvalue, lags, nobs, crit, _ = adfuller(series, regression="c", autolag="AIC", result_object=False)
-    return {"stat": stat, "pvalue": pvalue, "lags": lags, "nobs": nobs, "crit": crit}
+# --- stationarity -------------------------------------------------------------------------------
+
+def adf_test(series: np.ndarray) -> AdfResult:
+    """Augmented Dickey-Fuller test. H0: the series has a unit root (it is NOT stationary).
+    A statistic below the critical value (p-value < 0.05) rejects H0, i.e. the series is stationary."""
+    statistic, p_value, lags, n_obs, critical_values, _ = adfuller(
+        series, regression="c", autolag="AIC", result_object=False
+    )
+    return AdfResult(statistic, p_value, lags, n_obs, critical_values)
+
+
+def test_stationarity(spread_bars: pl.DataFrame) -> dict[str, AdfResult]:
+    """ADF test of the spread K, and of each leg alone over the same bars for comparison.
+    The legs are roll-free log prices: cumulative within-segment log returns."""
+    series = {
+        "Spread K": spread_bars["K"],
+        "ES alone": spread_bars["es_ret"].fill_null(0.0).cum_sum(),
+        "NIY alone": spread_bars["niy_ret"].fill_null(0.0).cum_sum(),
+    }
+    return {name: adf_test(values.to_numpy()) for name, values in series.items()}
+
+
+def print_adf_results(results: dict[str, AdfResult]) -> None:
+    print("ADF test (H0: unit root, i.e. not stationary)")
+    for name, r in results.items():
+        print(f"\t{name:<10} stat = {r.statistic:7.3f}   p-value = {r.p_value:.4f}   lags = {r.lags:3d}   n = {r.n_obs}")
+    critical = next(iter(results.values())).critical_values
+    print("\tcritical values:", {level: round(value, 3) for level, value in critical.items()})
 
 
 def main():
-    stock_columns = ["ts_recv", "instrument_id", "price", "size"]
-    exchange_columns = ["ts_event", "close"]
-    sp500 = read_dataset(
-        "ES-trades-2026-04-21_2026-10-21.parquet",
-        stock_columns,
-    )
+    data_dir = Path(__file__).parent.parent / "data"
+    es_trades = data_dir / "ES-trades-2026-04-21_2026-10-21.parquet"
+    niy_trades = data_dir / "NIY-trades-2026-04-21_2026-10-21.parquet"
+    usd_jpy = data_dir / "6J-ohlcv-1d-2026-04-21_2026-10-21.parquet"
 
-    niy = read_dataset(
-        "NIY-trades-2026-04-21_2026-10-21.parquet",
-        stock_columns
-    )
+    columns_trades = ["ts_recv", "instrument_id", "price", "size"]
+    columns_exchange = ["ts_event", "close"]
+    es_trades = pl.read_parquet(es_trades, columns=columns_trades)
+    niy_trades = pl.read_parquet(niy_trades, columns=columns_trades)
+    usd_jpy = pl.read_parquet(usd_jpy, columns=columns_exchange)
 
-    exchange = read_dataset(
-        "6J-ohlcv-1d-2026-04-21_2026-10-21.parquet",
-        exchange_columns
-    )
+    rolls = pl.concat([roll_times(es_trades), roll_times(niy_trades)]).unique().sort()
+    es_trades = with_segment(es_trades, rolls)
+    niy_trades = with_segment(niy_trades, rolls)
 
-    sp500, niy = insert_roll_index(sp500, niy)
-    sp500_bars = get_bars(sp500)
-    bars = get_joined_bars(sp500_bars, niy)
+    bars = es_dollar_bars(es_trades)
+    bars = add_niy_prices(bars, niy_trades)
+    bars = add_point_values(bars, usd_jpy)
+    bars = add_returns_and_rebalances(bars)
+    bars = etf_trick(bars)
 
-    fx = (
-        exchange
-        .select(
-            ts_known=pl.col("ts_event").dt.offset_by("1d"),
-            usd_per_jpy=pl.col("close"),
-        )
-        .sort("ts_known")
-    )
-
-    bars = (
-        bars
-        .join_asof(
-            fx, 
-            left_on="ts_start", 
-            right_on="ts_known", 
-            strategy="backward",
-        )
-        .with_columns(
-            pl.col("usd_per_jpy").backward_fill()
-        )
-        .with_columns(
-            es_phi=pl.lit(50.0), 
-            niy_phi=500 * pl.col("usd_per_jpy")
-        )
-        .with_columns(
-            es_ret=pl.col("es_close").log().diff().over("segment"),
-            niy_ret=pl.col("niy_close").log().diff().over("segment"),
-            week=pl.col("ts_start").dt.truncate("1w"),
-        )
-        .with_columns(
-            rebalance=(
-                (pl.col("segment") != pl.col("segment").shift(-1)) |
-                (pl.col("week") != pl.col("week").shift(-1))
-            )
-            .fill_null(False)
-        )
-    )
-
-    K, omegas = calculate_omegas(bars)
-    bars = bars.with_columns(
-        K=pl.Series(K),
-        omega_es=pl.Series(omegas[:, 0]),
-        omega_niy=pl.Series(omegas[:, 1]),
-    )
     plot_omegas(bars, "output/ex3-omegas.png")
     plot_spread(bars, "output/ex3-spread.png")
 
-    # part c): is the spread stationary? Compare with each leg on its own over the same bars.
+    # part c): is the spread stationary?
     spread_bars = bars.filter(pl.col("K").is_not_nan())
-    series = {
-        "Spread K": spread_bars["K"].to_numpy(),
-        # roll-free log prices: cumulative within-segment log returns
-        "ES alone": spread_bars["es_ret"].fill_null(0.0).cum_sum().to_numpy(),
-        "NIY alone": spread_bars["niy_ret"].fill_null(0.0).cum_sum().to_numpy(),
-    }
-    results = {name: adf_test(x) for name, x in series.items()}
-
-    print("ADF test (H0: unit root / not stationary)")
-    for name, r in results.items():
-        print(f"\t{name:<10} stat = {r['stat']:7.3f}   p-value = {r['pvalue']:.4f}   lags = {r['lags']:3d}   n = {r['nobs']}")
-    print("\tcritical values:", {k: round(v, 3) for k, v in results["Spread K"]["crit"].items()})
-
+    results = test_stationarity(spread_bars)
+    print_adf_results(results)
     plot_adf(spread_bars, results, "output/ex3-adf.png")
-
 
 
 if __name__ == "__main__":

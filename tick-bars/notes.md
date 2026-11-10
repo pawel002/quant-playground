@@ -578,4 +578,75 @@ What is interesting is that the bars break with adaptive threshold. Earlier I ha
 
 ### Applying the ETF trick to a portfolio in different currencies
 
-First let's describe what an ETF is. The acronym stands for Exchange-Traded Fund. It is a pooled investment vehicle that holds a basket of securities (such as stocks, bonds, or commodities) and trades on a stock exchange just like a regular individual stock. When you buy a share of an ETF, you are buying a proportional slice of that entire basket, allowing you to invest in hundreds or thousands of companies through a single transaction.
+First let's describe what an ETF is. The acronym stands for Exchange-Traded Fund. It is a pooled investment vehicle that holds a basket of securities (such as stocks, bonds, or commodities) and trades on a stock exchange just like a regular individual stock. When you buy a share of an ETF, you are buying a proportional slice of that entire basket, allowing you to invest in hundreds or thousands of companies through a single transaction. The book calls for the Eurostoxx 50 and SP500 portfolio, but the data was expensive so I have decided to use Nikkei 225 index values to perform the analysis. Because the SP500 and Nikkei represent different markets (American vs Japanese), some of the correlations which were expected to appear in this exercise, did not appear. Let's go over how to construct the etf trick for a portfolio.
+
+First we need to load the data. We need the sp500 ticks, the nikkei225 ticks and a daily conversion rate JPY/USD. We can load them like this:
+
+```python
+columns_trades = ["ts_recv", "instrument_id", "price", "size"]
+columns_exchange = ["ts_event", "close"]
+
+es_trades = pl.read_parquet(es_trades, columns=columns_trades)
+niy_trades = pl.read_parquet(niy_trades, columns=columns_trades)
+usd_jpy = pl.read_parquet(usd_jpy, columns=columns_exchange)
+```
+
+The next step is extracting the roll dates for undelying assets (in our example it will be for es and niy).
+
+```python
+def roll_times(trades: pl.DataFrame) -> pl.Series:
+    return (
+        trades
+        .filter(pl.col("instrument_id") != pl.col("instrument_id").shift())
+        .get_column("ts_recv")
+    )
+
+rolls = (
+    # combine the series uisng concat
+    pl.concat([roll_times(es_trades), roll_times(niy_trades)])
+    .unique()
+    .sort()
+)
+```
+
+We need to mark to which roll segment given trade classifies.
+
+```python
+def with_segment(trades: pl.DataFrame, rolls: pl.Series) -> pl.DataFrame:
+    # number the intervals between rolls:
+    # 0 before first roll,
+    # 1 after first, before second, and so on...
+    # side="right" puts the first trade of a new contract into the new segment
+    return trades.with_columns(
+        segment=rolls.search_sorted(trades["ts_recv"], side="right")
+    )
+
+es_trades = with_segment(es_trades, rolls)
+niy_trades = with_segment(niy_trades, rolls)
+```
+
+We can now formulate the pipeline for processing the actual ticks. First we need dollar volume bars for `es_trades`:
+
+```python
+ES_POINT_VALUE_USD = 50.0    # one ES index point is worth $50 per contract
+BAR_DOLLARS = 10e9           # ES dollar volume per bar
+
+def es_dollar_bars(es: pl.DataFrame) -> pl.DataFrame:
+    dollar_volume = pl.col("price") * pl.col("size") * ES_POINT_VALUE_USD
+    return (
+        es
+        .with_columns(bin=dollar_volume.cum_sum() // BAR_DOLLARS)
+        .group_by("segment", "bin")
+        .agg(
+            ts_start=pl.col("ts_recv").first(),
+            ts_end=pl.col("ts_recv").last(),
+            es_open=pl.col("price").first(),
+            es_close=pl.col("price").last(),
+        )
+        .sort("ts_start")
+        .with_row_index("bar_id")
+        .drop("bin")
+    )
+
+bars = es_dollar_bars(es_trades)
+```
